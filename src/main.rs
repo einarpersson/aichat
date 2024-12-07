@@ -6,6 +6,7 @@ mod rag;
 mod render;
 mod repl;
 mod serve;
+mod hooks;
 #[macro_use]
 mod utils;
 

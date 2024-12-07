@@ -1905,6 +1905,7 @@ impl Config {
     }
 
     pub fn before_chat_completion(&mut self, input: &Input) -> Result<()> {
+        crate::hooks::before_chat_completion(self, input)?;
         self.last_message = Some((input.clone(), String::new()));
         Ok(())
     }
