@@ -83,6 +83,7 @@ right_prompt:
 # ---- misc ----
 serve_addr: 127.0.0.1:8000                  # Default serve listening address 
 user_agent: null                            # Set User-Agent HTTP header, use `auto` for aichat/<current-version>
+save_shell_history: true                    # Whether to save shell execution command to the history file
 
 # ---- clients ----
 clients:
@@ -180,7 +181,7 @@ clients:
 
   # See https://docs.cohere.com/docs/the-cohere-platform
   - type: cohere
-    api_base: https://api.cohere.ai/v1                # Optional
+    api_base: https://api.cohere.ai/v2                # Optional
     api_key: xxx
 
   # See https://docs.perplexity.ai/docs/getting-started

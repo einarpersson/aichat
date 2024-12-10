@@ -63,7 +63,6 @@ impl Input {
         paths: Vec<String>,
         role: Option<Role>,
     ) -> Result<Self> {
-        let spinner = create_spinner("Loading files").await;
         let mut raw_paths = vec![];
         let mut local_paths = vec![];
         let mut remote_urls = vec![];
@@ -82,7 +81,6 @@ impl Input {
             }
         }
         let ret = load_documents(config, local_paths, remote_urls).await;
-        spinner.stop();
         let (files, medias, data_urls) = ret.context("Failed to load files")?;
         let mut texts = vec![];
         if !raw_text.is_empty() {
@@ -92,7 +90,9 @@ impl Input {
             texts.push(String::new());
         }
         for (path, contents) in files {
-            texts.push(format!("`{path}`:\n\n{contents}\n"));
+            texts.push(format!(
+                "============ PATH: {path} ============\n\n{contents}\n"
+            ));
         }
         let (role, with_session, with_agent) = resolve_role(&config.read(), role);
         Ok(Self {
@@ -110,6 +110,21 @@ impl Input {
             with_session,
             with_agent,
         })
+    }
+
+    pub async fn from_files_with_spinner(
+        config: &GlobalConfig,
+        raw_text: &str,
+        paths: Vec<String>,
+        role: Option<Role>,
+        abort_signal: AbortSignal,
+    ) -> Result<Self> {
+        abortable_run_with_spinner(
+            Input::from_files(config, raw_text, paths, role),
+            "Loading files",
+            abort_signal,
+        )
+        .await
     }
 
     pub fn is_empty(&self) -> bool {
@@ -371,7 +386,7 @@ async fn load_documents(
     let mut medias = vec![];
     let mut data_urls = HashMap::new();
     let loaders = config.read().document_loaders.clone();
-    let local_files = expand_glob_paths(&local_paths).await?;
+    let local_files = expand_glob_paths(&local_paths, true).await?;
     for file_path in local_files {
         if is_image(&file_path) {
             let data_url = read_media_to_data_url(&file_path)
@@ -379,9 +394,10 @@ async fn load_documents(
             data_urls.insert(sha256(&data_url), file_path);
             medias.push(data_url)
         } else {
-            let text = read_file(&file_path)
+            let document = load_file(&loaders, &file_path)
+                .await
                 .with_context(|| format!("Unable to read file '{file_path}'"))?;
-            files.push((file_path, text));
+            files.push((file_path, document.contents));
         }
     }
     for file_url in remote_urls {
@@ -445,13 +461,4 @@ fn read_media_to_data_url(image_path: &str) -> Result<String> {
     let data_url = format!("data:{};base64,{}", mime_type, encoded_image);
 
     Ok(data_url)
-}
-
-fn read_file<P: AsRef<Path>>(file_path: P) -> Result<String> {
-    let file_path = file_path.as_ref();
-
-    let mut text = String::new();
-    let mut file = File::open(file_path)?;
-    file.read_to_string(&mut text)?;
-    Ok(text)
 }

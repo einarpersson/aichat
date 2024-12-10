@@ -67,7 +67,7 @@ impl BedrockClient {
         let body = build_chat_completions_body(data, &self.model)?;
 
         let mut request_data = RequestData::new("", body);
-        self.patch_request_data(&mut request_data, ApiType::ChatCompletions);
+        self.patch_request_data(&mut request_data);
         let RequestData {
             url: _,
             headers,
@@ -118,7 +118,7 @@ impl BedrockClient {
         });
 
         let mut request_data = RequestData::new("", body);
-        self.patch_request_data(&mut request_data, ApiType::Embeddings);
+        self.patch_request_data(&mut request_data);
         let RequestData {
             url: _,
             headers,
@@ -233,7 +233,7 @@ async fn chat_completions_streaming(
                                     if !function_name.is_empty() {
                                         let arguments: Value =
                                         function_arguments.parse().with_context(|| {
-                                            format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                                            format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                                         })?;
                                         handler.tool_call(ToolCall::new(
                                             function_name.clone(),
@@ -257,7 +257,7 @@ async fn chat_completions_streaming(
                         "contentBlockStop" => {
                             if !function_name.is_empty() {
                                 let arguments: Value = function_arguments.parse().with_context(|| {
-                                    format!("Tool call '{function_name}' is invalid: arguments must be in valid JSON format")
+                                    format!("Tool call '{function_name}' have non-JSON arguments '{function_arguments}'")
                                 })?;
                                 handler.tool_call(ToolCall::new(
                                     function_name.clone(),

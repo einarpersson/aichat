@@ -14,12 +14,13 @@ mod utils;
 extern crate log;
 
 use crate::cli::Cli;
-use crate::client::{call_chat_completions, call_chat_completions_streaming, list_chat_models};
+use crate::client::{
+    call_chat_completions, call_chat_completions_streaming, list_models, ModelType,
+};
 use crate::config::{
     ensure_parent_exists, list_agents, load_env_file, Config, GlobalConfig, Input, WorkingMode,
     CODE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE, TEMP_SESSION_NAME,
 };
-use crate::function::need_send_tool_results;
 use crate::render::render_error;
 use crate::repl::Repl;
 use crate::utils::*;
@@ -67,11 +68,11 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         return serve::run(config, addr).await;
     }
     if cli.info {
-        config.write().print_info_only = true;
+        config.write().cli_info_flag = true;
     }
 
     if cli.list_models {
-        for model in list_chat_models(&config.read()) {
+        for model in list_models(&config.read(), ModelType::Chat) {
             println!("{}", model.id());
         }
         return Ok(());
@@ -100,6 +101,15 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
             Some(v) => v.as_str(),
             None => TEMP_SESSION_NAME,
         });
+        if !cli.agent_variable.is_empty() {
+            config.write().cli_agent_variables = Some(
+                cli.agent_variable
+                    .chunks(2)
+                    .map(|v| (v[0].to_string(), v[1].to_string()))
+                    .collect(),
+            );
+        }
+
         Config::use_agent(&config, agent, session, abort_signal.clone()).await?
     } else {
         if let Some(prompt) = &cli.prompt {
@@ -147,14 +157,14 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         if cfg!(target_os = "macos") && !stdin().is_terminal() {
             bail!("Unable to read the pipe for shell execution on MacOS")
         }
-        let input = create_input(&config, text, &cli.file).await?;
+        let input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
         shell_execute(&config, &SHELL, input, abort_signal.clone()).await?;
         return Ok(());
     }
     config.write().apply_prelude()?;
     match is_repl {
         false => {
-            let mut input = create_input(&config, text, &cli.file).await?;
+            let mut input = create_input(&config, text, &cli.file, abort_signal.clone()).await?;
             input.use_embeddings(abort_signal.clone()).await?;
             start_directive(&config, input, cli.code, abort_signal).await
         }
@@ -186,7 +196,7 @@ async fn start_directive(
         .write()
         .after_chat_completion(&input, &output, &tool_results)?;
 
-    if need_send_tool_results(&tool_results) {
+    if !tool_results.is_empty() {
         start_directive(
             config,
             input.merge_tool_results(output, tool_results),
@@ -261,9 +271,10 @@ async fn shell_execute(
                 "e" => {
                     debug!("{} {:?}", shell.cmd, &[&shell.arg, &eval_str]);
                     let code = run_command(&shell.cmd, &[&shell.arg, &eval_str], None)?;
-                    if code != 0 {
-                        process::exit(code);
+                    if code == 0 && config.read().save_shell_history {
+                        let _ = append_to_shell_history(&shell.name, &eval_str, code);
                     }
+                    process::exit(code);
                 }
                 "r" => {
                     let revision = Text::new("Enter your revision:").prompt()?;
@@ -321,11 +332,19 @@ async fn create_input(
     config: &GlobalConfig,
     text: Option<String>,
     file: &[String],
+    abort_signal: AbortSignal,
 ) -> Result<Input> {
     let input = if file.is_empty() {
         Input::from_str(config, &text.unwrap_or_default(), None)
     } else {
-        Input::from_files(config, &text.unwrap_or_default(), file.to_vec(), None).await?
+        Input::from_files_with_spinner(
+            config,
+            &text.unwrap_or_default(),
+            file.to_vec(),
+            None,
+            abort_signal,
+        )
+        .await?
     };
     if input.is_empty() {
         bail!("No input");

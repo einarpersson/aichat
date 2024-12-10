@@ -3,7 +3,7 @@ mod input;
 mod role;
 mod session;
 
-pub use self::agent::{list_agents, Agent};
+pub use self::agent::{list_agents, Agent, AgentVariables};
 pub use self::input::Input;
 pub use self::role::{
     Role, RoleLike, CODE_ROLE, CREATE_TITLE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE,
@@ -11,8 +11,8 @@ pub use self::role::{
 use self::session::Session;
 
 use crate::client::{
-    create_client_config, list_chat_models, list_client_types, list_reranker_models, ClientConfig,
-    MessageContentToolCalls, Model, OPENAI_COMPATIBLE_PLATFORMS,
+    create_client_config, list_client_types, list_models, ClientConfig, MessageContentToolCalls,
+    Model, ModelType, OPENAI_COMPATIBLE_PLATFORMS,
 };
 use crate::function::{FunctionDeclaration, Functions, ToolResult};
 use crate::rag::Rag;
@@ -137,6 +137,7 @@ pub struct Config {
 
     pub serve_addr: Option<String>,
     pub user_agent: Option<String>,
+    pub save_shell_history: bool,
 
     pub clients: Vec<ClientConfig>,
 
@@ -155,9 +156,12 @@ pub struct Config {
     #[serde(skip)]
     pub working_mode: WorkingMode,
     #[serde(skip)]
-    pub print_info_only: bool,
-    #[serde(skip)]
     pub last_message: Option<(Input, String)>,
+
+    #[serde(skip)]
+    pub cli_info_flag: bool,
+    #[serde(skip)]
+    pub cli_agent_variables: Option<AgentVariables>,
 }
 
 impl Default for Config {
@@ -206,6 +210,7 @@ impl Default for Config {
 
             serve_addr: None,
             user_agent: None,
+            save_shell_history: true,
 
             clients: vec![],
 
@@ -216,8 +221,10 @@ impl Default for Config {
             model: Default::default(),
             functions: Default::default(),
             working_mode: WorkingMode::Cmd,
-            print_info_only: false,
             last_message: None,
+
+            cli_info_flag: false,
+            cli_agent_variables: None,
         }
     }
 }
@@ -768,7 +775,7 @@ impl Config {
 
     pub fn set_rag_reranker_model(config: &GlobalConfig, value: Option<String>) -> Result<()> {
         if let Some(id) = &value {
-            Model::retrieve_reranker(&config.read(), id)?;
+            Model::retrieve_model(&config.read(), id, ModelType::Reranker)?;
         }
         let has_rag = config.read().rag.is_some();
         match has_rag {
@@ -815,7 +822,7 @@ impl Config {
     }
 
     pub fn set_model(&mut self, model_id: &str) -> Result<()> {
-        let model = Model::retrieve_chat(self, model_id)?;
+        let model = Model::retrieve_model(self, model_id, ModelType::Chat)?;
         match self.role_like_mut() {
             Some(role_like) => role_like.set_model(&model),
             None => {
@@ -886,7 +893,7 @@ impl Config {
         match role.model_id() {
             Some(model_id) => {
                 if self.model.id() != model_id {
-                    let model = Model::retrieve_chat(self, model_id)?;
+                    let model = Model::retrieve_model(self, model_id, ModelType::Chat)?;
                     role.set_model(&model);
                 } else {
                     role.set_model(&self.model);
@@ -908,7 +915,17 @@ impl Config {
     }
 
     pub fn edit_role(&mut self) -> Result<()> {
-        if let Some(name) = self.role.as_ref().map(|v| v.name().to_string()) {
+        if let Some(session) = self.session.as_ref() {
+            if let Some(name) = session.role_name().map(|v| v.to_string()) {
+                if session.is_empty() {
+                    self.upsert_role(&name)
+                } else {
+                    bail!("Cannot perform this operation because you are in a non-empty session")
+                }
+            } else {
+                bail!("No role")
+            }
+        } else if let Some(name) = self.role.as_ref().map(|v| v.name().to_string()) {
             self.upsert_role(&name)
         } else {
             bail!("No role")
@@ -1076,9 +1093,6 @@ impl Config {
             session.exit(&sessions_dir, self.working_mode.is_repl())?;
             self.last_message = None;
         }
-        if let Some(agent) = self.agent.as_mut() {
-            agent.set_session_variables(None);
-        }
         Ok(())
     }
 
@@ -1122,7 +1136,7 @@ impl Config {
     pub fn empty_session(&mut self) -> Result<()> {
         if let Some(session) = self.session.as_mut() {
             if let Some(agent) = self.agent.as_ref() {
-                session.sync_agent(agent, false);
+                session.sync_agent(agent);
             }
             session.clear_messages();
         } else {
@@ -1342,7 +1356,7 @@ impl Config {
         if new_document_paths.is_empty() || new_document_paths == document_paths {
             bail!("No changes")
         }
-        rag.refresh_document_paths(&new_document_paths, config, abort_signal)
+        rag.refresh_document_paths(&new_document_paths, false, config, abort_signal)
             .await?;
         config.write().rag = Some(Arc::new(rag));
         Ok(())
@@ -1354,7 +1368,7 @@ impl Config {
             None => bail!("No RAG"),
         };
         let document_paths = rag.document_paths().to_vec();
-        rag.refresh_document_paths(&document_paths, config, abort_signal)
+        rag.refresh_document_paths(&document_paths, true, config, abort_signal)
             .await?;
         config.write().rag = Some(Arc::new(rag));
         Ok(())
@@ -1487,13 +1501,16 @@ impl Config {
         if parts.len() != 2 {
             bail!("Usage: .variable <key> <value>");
         }
-        let key = parts[0];
-        let value = parts[1];
         match self.agent.as_mut() {
             Some(agent) => {
+                if let Some(session) = self.session.as_ref() {
+                    session.guard_empty()?;
+                }
+                let key = parts[0];
+                let value = parts[1];
                 agent.set_variable(key, value)?;
                 if let Some(session) = self.session.as_mut() {
-                    session.sync_agent(agent, true);
+                    session.sync_agent(agent);
                 }
             }
             None => bail!("No agent"),
@@ -1506,6 +1523,18 @@ impl Config {
         if self.agent.take().is_some() {
             self.rag.take();
             self.last_message = None;
+            self.cli_agent_variables = None;
+        }
+        Ok(())
+    }
+
+    pub fn exit_agent_session(&mut self) -> Result<()> {
+        self.exit_session()?;
+        if let Some(agent) = self.agent.as_mut() {
+            agent.exit_session();
+            if self.working_mode.is_repl() {
+                self.init_agent_shared_variables()?;
+            }
         }
         Ok(())
     }
@@ -1637,7 +1666,7 @@ impl Config {
         if args.len() == 1 {
             values = match cmd {
                 ".role" => map_completion_values(Self::list_roles(true)),
-                ".model" => list_chat_models(self)
+                ".model" => list_models(self, ModelType::Chat)
                     .into_iter()
                     .map(|v| (v.id(), Some(v.description())))
                     .collect(),
@@ -1732,7 +1761,10 @@ impl Config {
                     };
                     complete_option_bool(save_session)
                 }
-                "rag_reranker_model" => list_reranker_models(self).iter().map(|v| v.id()).collect(),
+                "rag_reranker_model" => list_models(self, ModelType::Reranker)
+                    .iter()
+                    .map(|v| v.id())
+                    .collect(),
                 "highlight" => complete_bool(self.highlight),
                 _ => vec![],
             };
@@ -1940,7 +1972,7 @@ impl Config {
         if output.is_empty() || !self.save {
             return Ok(());
         }
-        let timestamp = now();
+        let now = now();
         let summary = input.summary();
         let raw_input = input.raw();
         let scope = if self.agent.is_none() {
@@ -1973,7 +2005,7 @@ impl Config {
             None => String::new(),
         };
         let output = format!(
-            "# CHAT: {summary} [{timestamp}]{scope}\n{raw_input}\n--------\n{tool_calls}{output}\n--------\n\n",
+            "# CHAT: {summary} [{now}]{scope}\n{raw_input}\n--------\n{tool_calls}{output}\n--------\n\n",
         );
         file.write_all(output.as_bytes())
             .with_context(|| "Failed to save message")
@@ -1984,12 +2016,21 @@ impl Config {
             Some(v) => v,
             None => return Ok(()),
         };
-        let new_variables = Agent::init_agent_variables(
-            agent.defined_variables(),
-            agent.config_variables(),
-            self.print_info_only,
-        )?;
-        agent.set_shared_variables(new_variables);
+        if !agent.defined_variables().is_empty() && agent.shared_variables().is_empty() {
+            let mut config_variables = agent.config_variables().clone();
+            if let Some(v) = &self.cli_agent_variables {
+                config_variables.extend(v.clone());
+            }
+            let new_variables = Agent::init_agent_variables(
+                agent.defined_variables(),
+                &config_variables,
+                self.cli_info_flag,
+            )?;
+            agent.set_shared_variables(new_variables);
+        }
+        if !self.cli_info_flag {
+            agent.update_shared_dynamic_instructions(false)?;
+        }
         Ok(())
     }
 
@@ -1998,23 +2039,36 @@ impl Config {
             (Some(agent), Some(session)) => (agent, session),
             _ => return Ok(()),
         };
-        let shared_variables = agent.shared_variables();
-        let mut all_variables = if shared_variables.is_empty() {
-            agent.config_variables().clone()
+        if session.is_empty() {
+            let shared_variables = agent.shared_variables().clone();
+            let session_variables =
+                if !agent.defined_variables().is_empty() && shared_variables.is_empty() {
+                    let mut config_variables = agent.config_variables().clone();
+                    if let Some(v) = &self.cli_agent_variables {
+                        config_variables.extend(v.clone());
+                    }
+                    let new_variables = Agent::init_agent_variables(
+                        agent.defined_variables(),
+                        &config_variables,
+                        self.cli_info_flag,
+                    )?;
+                    agent.set_shared_variables(new_variables.clone());
+                    new_variables
+                } else {
+                    shared_variables
+                };
+            agent.set_session_variables(session_variables);
+            if !self.cli_info_flag {
+                agent.update_session_dynamic_instructions(None)?;
+            }
+            session.sync_agent(agent);
         } else {
-            shared_variables.clone()
-        };
-        all_variables.extend(session.agent_variables().clone());
-        let new_variables = Agent::init_agent_variables(
-            agent.defined_variables(),
-            &all_variables,
-            self.print_info_only,
-        )?;
-        if shared_variables.is_empty() {
-            agent.set_shared_variables(new_variables.clone());
+            let variables = session.agent_variables();
+            agent.set_session_variables(variables.clone());
+            agent.update_session_dynamic_instructions(Some(
+                session.agent_instructions().to_string(),
+            ))?;
         }
-        agent.set_session_variables(Some(new_variables));
-        session.sync_agent(agent, false);
         Ok(())
     }
 
@@ -2205,6 +2259,9 @@ impl Config {
         if let Some(v) = read_env_value::<String>(&get_env_name("user_agent")) {
             self.user_agent = v;
         }
+        if let Some(Some(v)) = read_env_bool(&get_env_name("save_shell_history")) {
+            self.save_shell_history = v;
+        }
     }
 
     fn load_functions(&mut self) -> Result<()> {
@@ -2215,7 +2272,7 @@ impl Config {
     fn setup_model(&mut self) -> Result<()> {
         let mut model_id = self.model_id.clone();
         if model_id.is_empty() {
-            let models = list_chat_models(self);
+            let models = list_models(self, ModelType::Chat);
             if models.is_empty() {
                 bail!("No available model");
             }
@@ -2307,8 +2364,21 @@ impl AssertState {
     pub fn pass() -> Self {
         AssertState::False(StateFlags::empty())
     }
+
     pub fn bare() -> Self {
         AssertState::Equal(StateFlags::empty())
+    }
+
+    pub fn assert(self, flags: StateFlags) -> bool {
+        match self {
+            AssertState::True(true_flags) => true_flags & flags != StateFlags::empty(),
+            AssertState::False(false_flags) => false_flags & flags == StateFlags::empty(),
+            AssertState::TrueFalse(true_flags, false_flags) => {
+                (true_flags & flags != StateFlags::empty())
+                    && (false_flags & flags == StateFlags::empty())
+            }
+            AssertState::Equal(check_flags) => check_flags == flags,
+        }
     }
 }
 

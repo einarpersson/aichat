@@ -27,15 +27,20 @@ pub fn eval_tool_calls(config: &GlobalConfig, mut calls: Vec<ToolCall>) -> Resul
     if calls.is_empty() {
         bail!("The request was aborted because an infinite loop of function calls was detected.")
     }
+    let mut is_all_null = true;
     for call in calls {
-        let result = call.eval(config)?;
+        let mut result = call.eval(config)?;
+        if result.is_null() {
+            result = json!("DONE");
+        } else {
+            is_all_null = false;
+        }
         output.push(ToolResult::new(call, result));
     }
+    if is_all_null {
+        output = vec![];
+    }
     Ok(output)
-}
-
-pub fn need_send_tool_results(arr: &[ToolResult]) -> bool {
-    arr.iter().any(|v| !v.output.is_null())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -159,25 +164,16 @@ impl ToolCall {
 
     pub fn eval(&self, config: &GlobalConfig) -> Result<Value> {
         let function_name = self.name.clone();
-        let (call_name, cmd_name, mut cmd_args, mut envs) = match &config.read().agent {
+        let (call_name, cmd_name, mut cmd_args, envs) = match &config.read().agent {
             Some(agent) => match agent.functions().find(&function_name) {
                 Some(function) => {
+                    let agent_name = agent.name().to_string();
                     if function.agent {
-                        let envs: HashMap<String, String> = agent
-                            .variables()
-                            .iter()
-                            .map(|(k, v)| {
-                                (
-                                    format!("LLM_AGENT_VAR_{}", normalize_env_name(k)),
-                                    v.clone(),
-                                )
-                            })
-                            .collect();
                         (
-                            format!("{}:{}", agent.name(), function_name),
-                            agent.name().to_string(),
+                            format!("{agent_name}-{function_name}"),
+                            agent_name,
                             vec![function_name],
-                            envs,
+                            agent.variable_envs(),
                         )
                     } else {
                         (
@@ -188,7 +184,7 @@ impl ToolCall {
                         )
                     }
                 }
-                None => bail!("Unexpected call {function_name} {}", self.arguments),
+                None => bail!("Unexpected call: {function_name} {}", self.arguments),
             },
             None => match config.read().functions.contains(&function_name) {
                 true => (
@@ -215,50 +211,63 @@ impl ToolCall {
         };
 
         cmd_args.push(json_data.to_string());
-        let prompt = format!("Call {cmd_name} {}", cmd_args.join(" "));
 
-        let mut bin_dirs: Vec<PathBuf> = vec![];
-        if let Some(agent) = config.read().agent.as_ref() {
-            let dir = Config::agent_functions_dir(agent.name()).join("bin");
-            if dir.exists() {
-                bin_dirs.push(dir);
-            }
-        }
-        bin_dirs.push(Config::functions_bin_dir());
-        let current_path = std::env::var("PATH").context("No PATH environment variable")?;
-        let prepend_path = bin_dirs
-            .iter()
-            .map(|v| format!("{}{PATH_SEP}", v.display()))
-            .collect::<Vec<_>>()
-            .join("");
-        envs.insert("PATH".into(), format!("{prepend_path}{current_path}"));
-
-        let temp_file = temp_file("-eval-", "");
-        envs.insert("LLM_OUTPUT".into(), temp_file.display().to_string());
-
-        #[cfg(windows)]
-        let cmd_name = polyfill_cmd_name(&cmd_name, &bin_dirs);
-        if *IS_STDOUT_TERMINAL {
-            println!("{}", dimmed_text(&prompt));
-        }
-        let exit_code = run_command(&cmd_name, &cmd_args, Some(envs))
-            .map_err(|err| anyhow!("Unable to run {cmd_name}, {err}"))?;
-        if exit_code != 0 {
-            bail!("Tool call exit with {exit_code}");
-        }
-        let output = if temp_file.exists() {
-            let contents =
-                fs::read_to_string(temp_file).context("Failed to retrieve tool call output")?;
-
-            serde_json::from_str(&contents)
+        let output = match run_llm_function(cmd_name, cmd_args, envs)? {
+            Some(contents) => serde_json::from_str(&contents)
                 .ok()
-                .unwrap_or_else(|| json!({"result": contents}))
-        } else {
-            Value::Null
+                .unwrap_or_else(|| json!({"output": contents})),
+            None => Value::Null,
         };
 
         Ok(output)
     }
+}
+
+pub fn run_llm_function(
+    cmd_name: String,
+    cmd_args: Vec<String>,
+    mut envs: HashMap<String, String>,
+) -> Result<Option<String>> {
+    let prompt = format!("Call {cmd_name} {}", cmd_args.join(" "));
+
+    let mut bin_dirs: Vec<PathBuf> = vec![];
+    if cmd_args.len() > 1 {
+        let dir = Config::agent_functions_dir(&cmd_name).join("bin");
+        if dir.exists() {
+            bin_dirs.push(dir);
+        }
+    }
+    bin_dirs.push(Config::functions_bin_dir());
+    let current_path = std::env::var("PATH").context("No PATH environment variable")?;
+    let prepend_path = bin_dirs
+        .iter()
+        .map(|v| format!("{}{PATH_SEP}", v.display()))
+        .collect::<Vec<_>>()
+        .join("");
+    envs.insert("PATH".into(), format!("{prepend_path}{current_path}"));
+
+    let temp_file = temp_file("-eval-", "");
+    envs.insert("LLM_OUTPUT".into(), temp_file.display().to_string());
+
+    #[cfg(windows)]
+    let cmd_name = polyfill_cmd_name(&cmd_name, &bin_dirs);
+    if *IS_STDOUT_TERMINAL {
+        println!("{}", dimmed_text(&prompt));
+    }
+    let exit_code = run_command(&cmd_name, &cmd_args, Some(envs))
+        .map_err(|err| anyhow!("Unable to run {cmd_name}, {err}"))?;
+    if exit_code != 0 {
+        bail!("Tool call exit with {exit_code}");
+    }
+    let mut output = None;
+    if temp_file.exists() {
+        let contents =
+            fs::read_to_string(temp_file).context("Failed to retrieve tool call output")?;
+        if !contents.is_empty() {
+            output = Some(contents);
+        }
+    };
+    Ok(output)
 }
 
 #[cfg(windows)]

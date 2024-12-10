@@ -8,9 +8,10 @@ use self::prompt::ReplPrompt;
 
 use crate::client::{call_chat_completions, call_chat_completions_streaming};
 use crate::config::{AssertState, Config, GlobalConfig, Input, StateFlags};
-use crate::function::need_send_tool_results;
 use crate::render::render_error;
-use crate::utils::{create_abort_signal, create_spinner, set_text, temp_file, AbortSignal};
+use crate::utils::{
+    abortable_run_with_spinner, create_abort_signal, set_text, temp_file, AbortSignal,
+};
 
 use anyhow::{bail, Context, Result};
 use fancy_regex::Regex;
@@ -52,7 +53,7 @@ lazy_static::lazy_static! {
         ReplCommand::new(
             ".edit role",
             "Edit the current role",
-            AssertState::TrueFalse(StateFlags::ROLE, StateFlags::SESSION_EMPTY | StateFlags::SESSION),
+            AssertState::TrueFalse(StateFlags::ROLE, StateFlags::SESSION),
         ),
         ReplCommand::new(
             ".save role",
@@ -99,6 +100,27 @@ lazy_static::lazy_static! {
             "End the session",
             AssertState::True(StateFlags::SESSION_EMPTY | StateFlags::SESSION)
         ),
+        ReplCommand::new(".agent", "Use a agent", AssertState::bare()),
+        ReplCommand::new(
+            ".starter",
+            "Use the conversation starter",
+            AssertState::True(StateFlags::AGENT)
+        ),
+        ReplCommand::new(
+            ".variable",
+            "Set agent variable",
+            AssertState::TrueFalse(StateFlags::AGENT, StateFlags::SESSION)
+        ),
+        ReplCommand::new(
+            ".info agent",
+            "View agent info",
+            AssertState::True(StateFlags::AGENT),
+        ),
+        ReplCommand::new(
+            ".exit agent",
+            "Leave the agent",
+            AssertState::True(StateFlags::AGENT)
+        ),
         ReplCommand::new(
             ".rag",
             "Init or use the RAG",
@@ -128,27 +150,6 @@ lazy_static::lazy_static! {
             ".exit rag",
             "Leave the RAG",
             AssertState::TrueFalse(StateFlags::RAG, StateFlags::AGENT),
-        ),
-        ReplCommand::new(".agent", "Use a agent", AssertState::bare()),
-        ReplCommand::new(
-            ".starter",
-            "Use the conversation starter",
-            AssertState::True(StateFlags::AGENT)
-        ),
-        ReplCommand::new(
-            ".variable",
-            "Set agent variable",
-            AssertState::TrueFalse(StateFlags::AGENT, StateFlags::SESSION)
-        ),
-        ReplCommand::new(
-            ".info agent",
-            "View agent info",
-            AssertState::True(StateFlags::AGENT),
-        ),
-        ReplCommand::new(
-            ".exit agent",
-            "Leave the agent",
-            AssertState::True(StateFlags::AGENT)
         ),
         ReplCommand::new(
             ".file",
@@ -193,7 +194,11 @@ impl Repl {
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        self.banner();
+        if AssertState::False(StateFlags::AGENT | StateFlags::RAG)
+            .assert(self.config.read().state())
+        {
+            self.banner();
+        }
 
         loop {
             if self.abort_signal.aborted_ctrld() {
@@ -226,7 +231,7 @@ impl Repl {
                 _ => {}
             }
         }
-        self.handle(".exit session").await?;
+        self.config.write().exit_session()?;
         Ok(())
     }
 
@@ -362,10 +367,12 @@ impl Repl {
                 },
                 ".compress" => match args {
                     Some("session") => {
-                        let spinner = create_spinner("Compressing").await;
-                        let ret = Config::compress_session(&self.config).await;
-                        spinner.stop();
-                        ret?;
+                        abortable_run_with_spinner(
+                            Config::compress_session(&self.config),
+                            "Compressing",
+                            self.abort_signal.clone(),
+                        )
+                        .await?;
                         println!("✓ Successfully compressed the session.");
                     }
                     _ => {
@@ -401,7 +408,14 @@ impl Repl {
                     Some(args) => {
                         let (files, text) = split_files_text(args);
                         let files = shell_words::split(files).with_context(|| "Invalid args")?;
-                        let input = Input::from_files(&self.config, text, files, None).await?;
+                        let input = Input::from_files_with_spinner(
+                            &self.config,
+                            text,
+                            files,
+                            None,
+                            self.abort_signal.clone(),
+                        )
+                        .await?;
                         ask(&self.config, self.abort_signal.clone(), input, true).await?;
                     }
                     None => println!("Usage: .file <files>... [-- <text>...]"),
@@ -448,7 +462,11 @@ impl Repl {
                         self.config.write().exit_role()?;
                     }
                     Some("session") => {
-                        self.config.write().exit_session()?;
+                        if self.config.read().agent.is_some() {
+                            self.config.write().exit_agent_session()?;
+                        } else {
+                            self.config.write().exit_session()?;
+                        }
                     }
                     Some("rag") => {
                         self.config.write().exit_rag()?;
@@ -592,15 +610,7 @@ impl ReplCommand {
     }
 
     fn is_valid(&self, flags: StateFlags) -> bool {
-        match self.state {
-            AssertState::True(true_flags) => true_flags & flags != StateFlags::empty(),
-            AssertState::False(false_flags) => false_flags & flags == StateFlags::empty(),
-            AssertState::TrueFalse(true_flags, false_flags) => {
-                (true_flags & flags != StateFlags::empty())
-                    && (false_flags & flags == StateFlags::empty())
-            }
-            AssertState::Equal(check_flags) => check_flags == flags,
-        }
+        self.state.assert(flags)
     }
 }
 
@@ -645,7 +655,7 @@ async fn ask(
     config
         .write()
         .after_chat_completion(&input, &output, &tool_results)?;
-    if need_send_tool_results(&tool_results) {
+    if !tool_results.is_empty() {
         ask(
             config,
             abort_signal,

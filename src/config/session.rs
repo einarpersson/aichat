@@ -35,7 +35,9 @@ pub struct Session {
     #[serde(skip_serializing_if = "Option::is_none")]
     role_name: Option<String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
-    agent_variables: IndexMap<String, String>,
+    agent_variables: AgentVariables,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    agent_instructions: String,
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     compressed_messages: Vec<Message>,
@@ -80,7 +82,7 @@ impl Session {
         let mut session: Self =
             serde_yaml::from_str(&content).with_context(|| format!("Invalid session {}", name))?;
 
-        session.model = Model::retrieve_chat(config, &session.model_id)?;
+        session.model = Model::retrieve_model(config, &session.model_id, ModelType::Chat)?;
 
         if let Some(autoname) = name.strip_prefix("_/") {
             session.name = TEMP_SESSION_NAME.to_string();
@@ -275,17 +277,19 @@ impl Session {
         self.role_prompt.clear();
     }
 
-    pub fn sync_agent(&mut self, agent: &Agent, set_dirty: bool) {
+    pub fn sync_agent(&mut self, agent: &Agent) {
         self.role_name = None;
         self.role_prompt = agent.interpolated_instructions();
         self.agent_variables = agent.variables().clone();
-        if set_dirty {
-            self.dirty = true;
-        }
+        self.agent_instructions = self.role_prompt.clone();
     }
 
-    pub fn agent_variables(&self) -> &IndexMap<String, String> {
+    pub fn agent_variables(&self) -> &AgentVariables {
         &self.agent_variables
+    }
+
+    pub fn agent_instructions(&self) -> &str {
+        &self.agent_instructions
     }
 
     pub fn set_save_session(&mut self, value: Option<bool>) {
