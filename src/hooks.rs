@@ -1,5 +1,12 @@
-use crate::config::{Config, Input, Role, TEMP_SESSION_NAME};
+use crate::config::{Config, Input, Role, Session, TEMP_SESSION_NAME};
 use anyhow::Result;
+
+pub fn before_exit(session: &mut Session) {
+    if session.user_messages_len() == 0 {
+        // println!("No messages in session, not saving");
+        session.set_save_session(Some(false));
+    }
+}
 
 pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> {
     let role = config.extract_role();
@@ -9,8 +16,7 @@ pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> 
         if let Some(msg) = session.messages.first_mut() {
             msg.content = crate::client::MessageContent::Text(new_prompt);
         } else {
-            // add some debug logging
-            println!("No messages in session, adding new prompt");
+            // println!("No messages in session, adding new prompt");
             session.messages.push(crate::client::Message::new(
                 crate::client::MessageRole::System,
                 crate::client::MessageContent::Text(new_prompt),
@@ -44,9 +50,6 @@ pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> 
                     history.push_str(&entry);
                     history.push_str("\n\n");
                 }
-
-                println!("History: {:?}", history);
-
                 session.set_autoname_from_chat_history(history);
             }
         }

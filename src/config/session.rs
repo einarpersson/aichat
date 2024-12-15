@@ -380,6 +380,7 @@ impl Session {
     }
 
     pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
+        crate::hooks::before_exit(self);
         let mut save_session = self.save_session();
         if self.save_session_this_time {
             save_session = Some(true);
