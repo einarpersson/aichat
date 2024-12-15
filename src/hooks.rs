@@ -1,17 +1,9 @@
-use crate::config::{Config, Input, Role};
+use crate::config::{Config, Input, Role, TEMP_SESSION_NAME};
 use anyhow::Result;
 
-pub fn before_chat_completion(config: &mut Config, _input: &Input) -> Result<()> {
+pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> {
     let role = config.extract_role();
     let new_prompt = fill_role_template(&role)?;
-
-    // Ok, remaining bugs:
-    // - The role template is only filled on the second message, not from startup. Either we modify
-    // the logic here and somehow inject if it is not there yet (but i'm not sure if it may have
-    // other side effects), or we could try to find the place in the code where the first message
-    // is generated and create a similar hook as this one (where we can call fill_role_template).
-    //
-    // - i've had some troubles with tool_builder role
 
     if let Some(session) = &mut config.session {
         if let Some(msg) = session.messages.first_mut() {
@@ -23,6 +15,14 @@ pub fn before_chat_completion(config: &mut Config, _input: &Input) -> Result<()>
                 crate::client::MessageRole::System,
                 crate::client::MessageContent::Text(new_prompt),
             ));
+        }
+
+        if session.name() == TEMP_SESSION_NAME && session.save_session() == Some(true) {
+            if session.user_messages_len() > 1 {
+                // println!("Activating autonaming...");
+                let messages = session.echo_messages(input);
+                session.set_autoname_from_chat_history(messages);
+            }
         }
     }
 

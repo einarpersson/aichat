@@ -375,6 +375,10 @@ impl Session {
         self.autoname = Some(AutoName::new(name));
     }
 
+    pub fn set_autoname_from_chat_history(&mut self, chat_history: String) {
+        self.autoname = Some(AutoName::new_from_chat_history(chat_history));
+    }
+
     pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
         let mut save_session = self.save_session();
         if self.save_session_this_time {
