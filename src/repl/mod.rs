@@ -23,11 +23,6 @@ use reedline::{
 use reedline::{MenuBuilder, Signal};
 use std::{env, process};
 
-lazy_static::lazy_static! {
-    static ref SPLIT_FILES_TEXT_ARGS_RE: Regex =
-        Regex::new(r"(?m) (-- |--\n|--\r\n|--\r|--$)").unwrap();
-}
-
 const MENU_NAME: &str = "completion_menu";
 
 lazy_static::lazy_static! {
@@ -285,7 +280,7 @@ impl Repl {
                     Some(args) => match args.split_once(['\n', ' ']) {
                         Some((name, text)) => {
                             let role = self.config.read().retrieve_role(name.trim())?;
-                            let input = Input::from_str(&self.config, text.trim(), Some(role));
+                            let input = Input::from_str(&self.config, text, Some(role));
                             ask(&self.config, self.abort_signal.clone(), input, false).await?;
                         }
                         None => {
@@ -406,8 +401,7 @@ impl Repl {
                 },
                 ".file" => match args {
                     Some(args) => {
-                        let (files, text) = split_files_text(args);
-                        let files = shell_words::split(files).with_context(|| "Invalid args")?;
+                        let (files, text) = split_files_text(args, cfg!(windows));
                         let input = Input::from_files_with_spinner(
                             &self.config,
                             text,
@@ -708,19 +702,76 @@ fn split_args(args: Option<&str>) -> Option<(&str, Option<&str>)> {
     })
 }
 
-fn split_files_text(args: &str) -> (&str, &str) {
-    match SPLIT_FILES_TEXT_ARGS_RE.find(args).ok().flatten() {
-        Some(mat) => {
-            let files = &args[0..mat.start()];
-            let text = if mat.end() < args.len() {
-                &args[mat.end()..]
-            } else {
-                ""
-            };
-            (files, text)
+fn split_files_text(line: &str, is_win: bool) -> (Vec<String>, &str) {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut unbalance: Option<char> = None;
+    let mut prev_char: Option<char> = None;
+    let mut text_starts_at = None;
+    let unquote_word = |word: &str| {
+        if ((word.starts_with('"') && word.ends_with('"'))
+            || (word.starts_with('\'') && word.ends_with('\'')))
+            && word.len() >= 2
+        {
+            word[1..word.len() - 1].to_string()
+        } else {
+            word.to_string()
         }
-        None => (args, ""),
+    };
+    let chars: Vec<char> = line.chars().collect();
+
+    for (i, char) in chars.iter().cloned().enumerate() {
+        match unbalance {
+            Some(ub_char) if ub_char == char => {
+                word.push(char);
+                unbalance = None;
+            }
+            Some(_) => {
+                word.push(char);
+            }
+            None => match char {
+                ' ' | '\t' | '\r' | '\n' => {
+                    if char == '\r' && chars.get(i + 1) == Some(&'\n') {
+                        continue;
+                    }
+                    if let Some('\\') = prev_char.filter(|_| !is_win) {
+                        word.push(char);
+                    } else if !word.is_empty() {
+                        if word == "--" {
+                            word.clear();
+                            text_starts_at = Some(i + 1);
+                            break;
+                        }
+                        words.push(unquote_word(&word));
+                        word.clear();
+                    }
+                }
+                '\'' | '"' => {
+                    word.push(char);
+                    unbalance = Some(char);
+                }
+                '\\' => {
+                    if is_win || prev_char.map(|c| c == '\\').unwrap_or_default() {
+                        word.push(char);
+                    }
+                }
+                _ => {
+                    word.push(char);
+                }
+            },
+        }
+        prev_char = Some(char);
     }
+
+    if !word.is_empty() && word != "--" {
+        words.push(unquote_word(&word));
+    }
+    let text = match text_starts_at {
+        Some(start) => &line[start..],
+        None => "",
+    };
+
+    (words, text)
 }
 
 #[cfg(test)]
@@ -748,20 +799,55 @@ mod tests {
 
     #[test]
     fn test_split_files_text() {
-        assert_eq!(split_files_text("file.txt"), ("file.txt", ""));
-        assert_eq!(split_files_text("file.txt --"), ("file.txt", ""));
-        assert_eq!(split_files_text("file.txt -- hello"), ("file.txt", "hello"));
         assert_eq!(
-            split_files_text("file.txt --\nhello"),
-            ("file.txt", "hello")
+            split_files_text("file.txt", false),
+            (vec!["file.txt".into()], "")
         );
         assert_eq!(
-            split_files_text("file.txt --\r\nhello"),
-            ("file.txt", "hello")
+            split_files_text("file.txt --", false),
+            (vec!["file.txt".into()], "")
         );
         assert_eq!(
-            split_files_text("file.txt --\rhello"),
-            ("file.txt", "hello")
+            split_files_text("file.txt -- hello", false),
+            (vec!["file.txt".into()], "hello")
+        );
+        assert_eq!(
+            split_files_text("file.txt -- \thello", false),
+            (vec!["file.txt".into()], "\thello")
+        );
+        assert_eq!(
+            split_files_text("file.txt --\nhello", false),
+            (vec!["file.txt".into()], "hello")
+        );
+        assert_eq!(
+            split_files_text("file.txt --\r\nhello", false),
+            (vec!["file.txt".into()], "hello")
+        );
+        assert_eq!(
+            split_files_text("file.txt --\rhello", false),
+            (vec!["file.txt".into()], "hello")
+        );
+        assert_eq!(
+            split_files_text(r#"file1.txt 'file2.txt' "file3.txt""#, false),
+            (
+                vec!["file1.txt".into(), "file2.txt".into(), "file3.txt".into()],
+                ""
+            )
+        );
+        assert_eq!(
+            split_files_text(r#"./file1.txt 'file1 - Copy.txt' file\ 2.txt"#, false),
+            (
+                vec![
+                    "./file1.txt".into(),
+                    "file1 - Copy.txt".into(),
+                    "file 2.txt".into()
+                ],
+                ""
+            )
+        );
+        assert_eq!(
+            split_files_text(r#".\file.txt C:\dir\file.txt"#, true),
+            (vec![".\\file.txt".into(), "C:\\dir\\file.txt".into()], "")
         );
     }
 }
