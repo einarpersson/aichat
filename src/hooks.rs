@@ -19,9 +19,35 @@ pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> 
 
         if session.name() == TEMP_SESSION_NAME && session.save_session() == Some(true) {
             if session.user_messages_len() > 1 {
-                // println!("Activating autonaming...");
-                let messages = session.echo_messages(input);
-                session.set_autoname_from_chat_history(messages);
+                let messages = session.build_messages(input);
+                let max_history_len = 140;
+
+                let mut history = String::new();
+                for message in messages {
+                    let mut entry = message.content.to_text();
+                    if entry.len() > max_history_len {
+                        entry.truncate(max_history_len);
+                        entry.push_str("[...]");
+                    }
+
+                    if message.role.is_system() {
+                        continue;
+                    }
+
+                    if message.role.is_user() {
+                        history.push_str("User: ");
+                    } else {
+                        history.push_str("Assistant: ");
+                    }
+
+                    history.push_str("\n");
+                    history.push_str(&entry);
+                    history.push_str("\n\n");
+                }
+
+                println!("History: {:?}", history);
+
+                session.set_autoname_from_chat_history(history);
             }
         }
     }
