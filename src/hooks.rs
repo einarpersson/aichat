@@ -23,7 +23,7 @@ pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> 
             ));
         }
 
-        if session.name() == TEMP_SESSION_NAME && session.save_session() == Some(true) {
+        if session.name() == TEMP_SESSION_NAME && session.save_session() == Some(true) && session.autoname() == None {
             if session.user_messages_len() > 1 {
                 let messages = session.build_messages(input);
                 let max_history_len = 140;
