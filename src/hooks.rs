@@ -1,4 +1,4 @@
-use crate::config::{Config, Input, Role, Session, TEMP_SESSION_NAME};
+use crate::config::{Config, Input, Session, TEMP_SESSION_NAME};
 use anyhow::Result;
 
 pub fn before_exit(session: &mut Session) {
@@ -9,8 +9,7 @@ pub fn before_exit(session: &mut Session) {
 }
 
 pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> {
-    let role = config.extract_role();
-    let new_prompt = fill_role_template(&role)?;
+    let new_prompt = fill_role_template(&config)?;
 
     if let Some(session) = &mut config.session {
         if let Some(msg) = session.messages.first_mut() {
@@ -23,7 +22,10 @@ pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> 
             ));
         }
 
-        if session.name() == TEMP_SESSION_NAME && session.save_session() == Some(true) && session.autoname() == None {
+        if session.name() == TEMP_SESSION_NAME
+            && session.save_session() == Some(true)
+            && session.autoname() == None
+        {
             if session.user_messages_len() > 1 {
                 let messages = session.build_messages(input);
                 let max_history_len = 140;
@@ -58,23 +60,26 @@ pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> 
     Ok(())
 }
 
-fn fill_role_template(role: &Role) -> Result<String> {
+fn fill_role_template(config: &Config) -> Result<String> {
+    let role = config.extract_role();
     let prompt = role.prompt();
     let name = role.name();
 
-    // TODO: use the roles_dir from the global config
-    let role_env_file = format!("~/config/aichat/roles/{}.sh", name);
+    let roles_dir = Config::roles_dir();
+    let roles_dir_str = roles_dir.to_string_lossy();
+    let role_env_file = format!("{}/{}.sh", roles_dir_str, name);
+    let common_env_file = "~/.config/aichat/roles/env.sh";
 
     let output = std::process::Command::new("bash")
         .arg("-c")
         .arg(format!(
             r#"
-source ~/config/aichat/roles/env.sh
+source {}
 source {} 2>/dev/null || true
 envsubst <<'EOF'
 {}
 EOF"#,
-            role_env_file, prompt
+            common_env_file, role_env_file, prompt
         ))
         .output()?;
 
