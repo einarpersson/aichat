@@ -3,10 +3,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::{
-    client::ChatCompletionsData,
-    config::Input,
-};
+use crate::{client::ChatCompletionsData, config::Input};
 use anyhow::{Context, Result};
 
 // pub fn before_exit(session: &mut Session) {
@@ -20,7 +17,20 @@ pub fn chat_completion_data(
     data: ChatCompletionsData,
     input: &Input,
 ) -> Result<ChatCompletionsData> {
+    // Save original PATH
+    let original_path = std::env::var("PATH").context("Failed to get PATH")?;
+
+    // Construct hooks path and new PATH
+    let hooks_path = format!(
+        "{}/aichat/hooks",
+        std::env::var("XDG_CONFIG_HOME").context("XDG_CONFIG_HOME not set")?
+    );
+    let new_path = format!("{}:{}", hooks_path, original_path);
+    std::env::set_var("PATH", &new_path);
+
+    // Early return if hook doesn't exist
     if which::which("chat_completion_data").is_err() {
+        std::env::set_var("PATH", original_path);
         return Ok(data);
     }
 
@@ -46,6 +56,7 @@ pub fn chat_completion_data(
         .context("Failed to get output from external command")?;
 
     std::env::remove_var("AICHAT_HOOKS_ROLE");
+    std::env::set_var("PATH", original_path);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
