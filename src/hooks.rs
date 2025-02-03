@@ -20,11 +20,11 @@ pub fn chat_completion_data(
     // Save original PATH
     let original_path = std::env::var("PATH").context("Failed to get PATH")?;
 
+    let config_dir = crate::config::Config::config_dir();
+    let config_dir = config_dir.to_str().context("Failed to convert config dir to string")?;
+
     // Construct hooks path and new PATH
-    let hooks_path = format!(
-        "{}/aichat/hooks",
-        std::env::var("XDG_CONFIG_HOME").context("XDG_CONFIG_HOME not set")?
-    );
+    let hooks_path = format!("{}/hooks", config_dir);
     let new_path = format!("{}:{}", hooks_path, original_path);
     std::env::set_var("PATH", &new_path);
 
