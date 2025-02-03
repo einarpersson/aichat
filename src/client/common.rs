@@ -14,7 +14,7 @@ use inquire::{required, Text};
 use reqwest::{Client as ReqwestClient, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{future::Future, time::Duration};
+use std::time::Duration;
 use tokio::sync::mpsc::unbounded_channel;
 
 const MODELS_YAML: &str = include_str!("../../models.yaml");
@@ -44,8 +44,9 @@ pub trait Client: Sync + Send {
         let mut builder = ReqwestClient::builder();
         let extra = self.extra_config();
         let timeout = extra.and_then(|v| v.connect_timeout).unwrap_or(10);
-        let proxy = extra.and_then(|v| v.proxy.clone());
-        builder = set_proxy(builder, proxy.as_ref())?;
+        if let Some(proxy) = extra.and_then(|v| v.proxy.as_deref()) {
+            builder = set_proxy(builder, proxy)?;
+        }
         if let Some(user_agent) = self.global_config().read().user_agent.as_ref() {
             builder = builder.user_agent(user_agent);
         }
@@ -377,6 +378,7 @@ pub fn create_openai_compatible_client_config(client: &str) -> Result<Option<(St
 
 pub async fn call_chat_completions(
     input: &Input,
+    print: bool,
     extract_code: bool,
     client: &dyn Client,
     abort_signal: AbortSignal,
@@ -396,10 +398,12 @@ pub async fn call_chat_completions(
                 ..
             } = ret;
             if !text.is_empty() {
-                if extract_code && text.trim_start().starts_with("```") {
-                    text = extract_block(&text);
+                if extract_code {
+                    text = extract_code_block(&text).to_string();
                 }
-                client.global_config().read().print_markdown(&text)?;
+                if print {
+                    client.global_config().read().print_markdown(&text)?;
+                }
             }
             Ok((text, eval_tool_calls(client.global_config(), tool_calls)?))
         }
@@ -441,23 +445,6 @@ pub async fn call_chat_completions_streaming(
             Err(err)
         }
     }
-}
-
-#[allow(unused)]
-pub async fn chat_completions_as_streaming<F, Fut>(
-    builder: RequestBuilder,
-    handler: &mut SseHandler,
-    f: F,
-) -> Result<()>
-where
-    F: FnOnce(RequestBuilder) -> Fut,
-    Fut: Future<Output = Result<String>>,
-{
-    let text = f(builder).await?;
-    handler.text(&text)?;
-    handler.done();
-
-    Ok(())
 }
 
 pub fn noop_prepare_embeddings<T>(_client: &T, _data: &EmbeddingsData) -> Result<RequestData> {
