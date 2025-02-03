@@ -5,6 +5,7 @@ use crate::client::{
     MessageContent, MessageContentPart, MessageContentToolCalls, MessageRole, Model,
 };
 use crate::function::ToolResult;
+use crate::hooks;
 use crate::utils::{base64_encode, sha256, AbortSignal};
 
 use anyhow::{bail, Context, Result};
@@ -257,13 +258,16 @@ impl Input {
         let temperature = self.role().temperature();
         let top_p = self.role().top_p();
         let functions = self.config.read().select_functions(self.role());
-        Ok(ChatCompletionsData {
+        let data = ChatCompletionsData {
             messages,
             temperature,
             top_p,
             functions,
             stream,
-        })
+        };
+
+        let data = hooks::chat_completion_data(data, &self)?;
+        Ok(data)
     }
 
     pub fn build_messages(&self) -> Result<Vec<Message>> {

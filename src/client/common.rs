@@ -12,7 +12,7 @@ use fancy_regex::Regex;
 use indexmap::IndexMap;
 use inquire::{required, Text};
 use reqwest::{Client as ReqwestClient, RequestBuilder};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{future::Future, time::Duration};
 use tokio::sync::mpsc::unbounded_channel;
@@ -262,7 +262,7 @@ impl RequestData {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChatCompletionsData {
     pub messages: Vec<Message>,
     pub temperature: Option<f64>,

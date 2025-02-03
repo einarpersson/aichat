@@ -41,7 +41,7 @@ pub struct Session {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     compressed_messages: Vec<Message>,
-    pub messages: Vec<Message>,
+    messages: Vec<Message>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     data_urls: HashMap<String, String>,
 
@@ -374,12 +374,8 @@ impl Session {
         self.autoname = Some(AutoName::new(name));
     }
 
-    pub fn set_autoname_from_chat_history(&mut self, chat_history: String) {
-        self.autoname = Some(AutoName::new_from_chat_history(chat_history));
-    }
-
     pub fn exit(&mut self, session_dir: &Path, is_repl: bool) -> Result<()> {
-        crate::hooks::before_exit(self);
+        // crate::hooks::before_exit(self);
         let mut save_session = self.save_session();
         if self.save_session_this_time {
             save_session = Some(true);

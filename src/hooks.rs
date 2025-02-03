@@ -1,87 +1,67 @@
-use crate::config::{Config, Input, Session, TEMP_SESSION_NAME};
-use anyhow::Result;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
-pub fn before_exit(session: &mut Session) {
-    if session.user_messages_len() == 0 {
-        // println!("No messages in session, not saving");
-        session.set_save_session(Some(false));
-    }
-}
+use crate::{
+    client::ChatCompletionsData,
+    config::{Input, Session},
+};
+use anyhow::{Context, Result};
 
-pub fn before_chat_completion(config: &mut Config, input: &Input) -> Result<()> {
-    let new_prompt = fill_role_template(&config)?;
+// pub fn before_exit(session: &mut Session) {
+//     if session.user_messages_len() == 0 {
+//         // println!("No messages in session, not saving");
+//         session.set_save_session(Some(false));
+//     }
+// }
 
-    if let Some(session) = &mut config.session {
-        if let Some(msg) = session.messages.first_mut() {
-            msg.content = crate::client::MessageContent::Text(new_prompt);
-        } else {
-            // println!("No messages in session, adding new prompt");
-            session.messages.push(crate::client::Message::new(
-                crate::client::MessageRole::System,
-                crate::client::MessageContent::Text(new_prompt),
-            ));
-        }
-
-        if session.name() == TEMP_SESSION_NAME
-            && session.save_session() == Some(true)
-            && session.autoname() == None
-        {
-            if session.user_messages_len() > 1 {
-                let messages = session.build_messages(input);
-                let max_history_len = 140;
-
-                let mut history = String::new();
-                for message in messages {
-                    let mut entry = message.content.to_text();
-                    if entry.len() > max_history_len {
-                        entry.truncate(max_history_len);
-                        entry.push_str("[...]");
-                    }
-
-                    if message.role.is_system() {
-                        continue;
-                    }
-
-                    if message.role.is_user() {
-                        history.push_str("User: ");
-                    } else {
-                        history.push_str("Assistant: ");
-                    }
-
-                    history.push_str("\n");
-                    history.push_str(&entry);
-                    history.push_str("\n\n");
-                }
-                session.set_autoname_from_chat_history(history);
-            }
-        }
+pub fn chat_completion_data(
+    data: ChatCompletionsData,
+    input: &Input,
+) -> Result<ChatCompletionsData> {
+    if which::which("chat_completion_data").is_err() {
+        println!("chat_completion_data hook not found, skipping");
+        return Ok(data);
     }
 
-    Ok(())
-}
+    std::env::set_var("AICHAT_HOOKS_ROLE", input.role().name());
 
-fn fill_role_template(config: &Config) -> Result<String> {
-    let role = config.extract_role();
-    let prompt = role.prompt();
-    let name = role.name();
+    let mut child = Command::new("chat_completion_data")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn external command")?;
 
-    let roles_dir = Config::roles_dir();
-    let roles_dir_str = roles_dir.to_string_lossy();
-    let role_env_file = format!("{}/{}.sh", roles_dir_str, name);
-    let common_env_file = "~/.config/aichat/roles/env.sh";
+    let json = serde_json::to_string(&data).context("Failed to serialize input data")?;
 
-    let output = std::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            r#"
-source {}
-source {} 2>/dev/null || true
-envsubst <<'EOF'
-{}
-EOF"#,
-            common_env_file, role_env_file, prompt
-        ))
-        .output()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(json.as_bytes())
+            .context("Failed to write to external command")?;
+    }
 
-    Ok(String::from_utf8(output.stdout)?)
+    let output = child
+        .wait_with_output()
+        .context("Failed to get output from external command")?;
+
+    std::env::remove_var("AICHAT_HOOKS_ROLE");
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("External command failed: {}", stderr);
+    }
+
+    match serde_json::from_slice(&output.stdout) {
+        Ok(new_data) => Ok(new_data),
+        Err(e) => {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            anyhow::bail!(
+                "Failed to parse command output: {}. Output was: {}",
+                e,
+                output_str
+            )
+        }
+    }
 }

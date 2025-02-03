@@ -350,15 +350,7 @@ impl Config {
         match &self.agent {
             None => match env::var(get_env_name("sessions_dir")) {
                 Ok(value) => PathBuf::from(value),
-                Err(_) => {
-                    if let Ok(current_dir) = std::env::current_dir() {
-                        let local_aichat = current_dir.join(".aichat");
-                        if local_aichat.is_dir() {
-                            return local_aichat.join(SESSIONS_DIR_NAME);
-                        }
-                    }
-                    Self::local_path(SESSIONS_DIR_NAME)
-                }
+                Err(_) => Self::local_path(SESSIONS_DIR_NAME),
             },
             Some(agent) => Self::agent_data_dir(agent.name()).join(SESSIONS_DIR_NAME),
         }
@@ -2044,7 +2036,6 @@ impl Config {
     }
 
     pub fn before_chat_completion(&mut self, input: &Input) -> Result<()> {
-        crate::hooks::before_chat_completion(self, input)?;
         self.last_message = Some(LastMessage::new(input.clone(), String::new()));
         Ok(())
     }
