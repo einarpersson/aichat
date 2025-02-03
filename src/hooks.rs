@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     client::ChatCompletionsData,
-    config::{Input, Session},
+    config::Input,
 };
 use anyhow::{Context, Result};
 
@@ -21,7 +21,6 @@ pub fn chat_completion_data(
     input: &Input,
 ) -> Result<ChatCompletionsData> {
     if which::which("chat_completion_data").is_err() {
-        println!("chat_completion_data hook not found, skipping");
         return Ok(data);
     }
 
