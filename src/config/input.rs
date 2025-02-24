@@ -265,7 +265,7 @@ impl Input {
         let temperature = self.role().temperature();
         let top_p = self.role().top_p();
         let functions = self.config.read().select_functions(self.role());
-        let data = ChatCompletionsData {
+        let mut data = ChatCompletionsData {
             messages,
             temperature,
             top_p,
@@ -273,7 +273,7 @@ impl Input {
             stream,
         };
 
-        let data = hooks::chat_completion_data(data, &self)?;
+        hooks::after_prepare_chat_completion_data(&mut data, &self);
         Ok(data)
     }
 

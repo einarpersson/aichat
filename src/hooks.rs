@@ -3,29 +3,47 @@ use std::{
     process::{Command, Stdio},
 };
 
-use crate::{client::ChatCompletionsData, config::Input};
+use crate::{
+    client::ChatCompletionsData,
+    config::{Input, Session},
+};
 use anyhow::{Context, Result};
 
-// pub fn before_exit(session: &mut Session) {
-//     if session.user_messages_len() == 0 {
-//         // println!("No messages in session, not saving");
-//         session.set_save_session(Some(false));
-//     }
-// }
+pub fn before_exit(session: &mut Session) {
+    let hook_name = "before_exit";
 
-pub fn chat_completion_data(
-    data: ChatCompletionsData,
-    input: &Input,
-) -> Result<ChatCompletionsData> {
-    let env_vars = vec![("AICHAT_HOOKS_ROLE", input.role().name().to_string())];
-
-    run_hook("chat_completion_data", data, Some(env_vars))
+    match run_hook(hook_name, session, None) {
+        Ok(Some(_updated_session)) => {
+            // *session = updated_session;
+            // Here we need to be careful so we don't loose any data
+            // Also, we perhaps should create an alternative SessionView type that serializes more fields
+        }
+        Ok(None) => (), // No hook found, do nothing
+        Err(e) => eprintln!("Error running before_exit hook: {}", e),
+    }
 }
 
-pub fn run_hook<T, U>(hook_name: &str, hook_input: T, env_vars: Option<Vec<(&str, String)>>) -> Result<U>
+pub fn after_prepare_chat_completion_data(data: &mut ChatCompletionsData, input: &Input) {
+    let hook_name = "after_prepare_chat_completion_data";
+    let env_vars = Some(vec![("AICHAT_HOOKS_ROLE", input.role().name().to_string())]);
+
+    match run_hook(hook_name, data, env_vars) {
+        Ok(Some(updated_data)) => *data = updated_data,
+        Ok(None) => (),
+        Err(e) => eprintln!(
+            "Error running after_prepare_chat_completion_data hook: {}",
+            e
+        ),
+    }
+}
+
+pub fn run_hook<T>(
+    hook_name: &str,
+    hook_input: &T,
+    env_vars: Option<Vec<(&str, String)>>,
+) -> Result<Option<T>>
 where
-    T: serde::Serialize,
-    U: serde::de::DeserializeOwned,
+    T: serde::Serialize + serde::de::DeserializeOwned,
 {
     // Save original PATH
     let original_path = std::env::var("PATH").context("Failed to get PATH")?;
@@ -50,10 +68,7 @@ where
     // Early return if hook doesn't exist
     if which::which(hook_name).is_err() {
         cleanup_path(&original_path);
-        // Need to serialize and deserialize to convert T to U
-        let json = serde_json::to_string(&hook_input)
-            .context("Failed to serialize input for type conversion")?;
-        return serde_json::from_str(&json).context("Failed to deserialize input to output type");
+        return Ok(None);
     }
 
     // Set any provided environment variables
@@ -90,10 +105,14 @@ where
     }
     cleanup_path(&original_path);
 
+    // Print stderr as-is
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
     // Handle results
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Hook '{}' failed: {}", hook_name, stderr);
+        anyhow::bail!("Hook '{}' failed with non-zero status", hook_name);
     }
 
     match serde_json::from_slice(&output.stdout) {
