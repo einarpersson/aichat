@@ -116,8 +116,8 @@ pub struct Config {
     pub mapping_tools: IndexMap<String, String>,
     pub use_tools: Option<String>,
 
-    pub prelude: Option<String>,
     pub repl_prelude: Option<String>,
+    pub cmd_prelude: Option<String>,
     pub agent_prelude: Option<String>,
 
     pub save_session: Option<bool>,
@@ -192,8 +192,8 @@ impl Default for Config {
             mapping_tools: Default::default(),
             use_tools: None,
 
-            prelude: None,
             repl_prelude: None,
+            cmd_prelude: None,
             agent_prelude: None,
 
             save_session: None,
@@ -242,7 +242,7 @@ impl Default for Config {
 pub type GlobalConfig = Arc<RwLock<Config>>;
 
 impl Config {
-    pub fn init(working_mode: WorkingMode, info_flag: bool) -> Result<Self> {
+    pub async fn init(working_mode: WorkingMode, info_flag: bool) -> Result<Self> {
         let config_path = Self::config_file();
         let mut config = if !config_path.exists() {
             match env::var(get_env_name("provider"))
@@ -252,7 +252,7 @@ impl Config {
                 Some(v) => Self::load_dynamic(&v)?,
                 None => {
                     if *IS_STDOUT_TERMINAL {
-                        create_config_file(&config_path)?;
+                        create_config_file(&config_path).await?;
                     }
                     Self::load_from_file(&config_path)?
                 }
@@ -591,7 +591,7 @@ impl Config {
             ("use_tools", format_option_value(&role.use_tools())),
             (
                 "max_output_tokens",
-                self.model
+                role.model()
                     .max_tokens_param()
                     .map(|v| format!("{v} (current model)"))
                     .unwrap_or_else(|| "null".into()),
@@ -867,7 +867,7 @@ impl Config {
 
     pub fn use_prompt(&mut self, prompt: &str) -> Result<()> {
         let mut role = Role::new(TEMP_ROLE_NAME, prompt);
-        role.set_model(&self.model);
+        role.set_model(self.current_model());
         self.use_role_obj(role)
     }
 
@@ -923,16 +923,17 @@ impl Config {
         } else {
             Role::builtin(name)?
         };
+        let current_model = self.current_model();
         match role.model_id() {
             Some(model_id) => {
-                if self.model.id() != model_id {
+                if current_model.id() != model_id {
                     let model = Model::retrieve_model(self, model_id, ModelType::Chat)?;
                     role.set_model(&model);
                 } else {
-                    role.set_model(&self.model);
+                    role.set_model(current_model);
                 }
             }
-            None => role.set_model(&self.model),
+            None => role.set_model(current_model),
         }
         Ok(role)
     }
@@ -1605,8 +1606,8 @@ impl Config {
             return Ok(());
         }
         let prelude = match self.working_mode {
-            WorkingMode::Cmd => self.prelude.as_ref(),
-            WorkingMode::Repl => self.repl_prelude.as_ref().or(self.prelude.as_ref()),
+            WorkingMode::Repl => self.repl_prelude.as_ref(),
+            WorkingMode::Cmd => self.cmd_prelude.as_ref(),
             WorkingMode::Serve => return Ok(()),
         };
         let prelude = match prelude {
@@ -1795,7 +1796,7 @@ impl Config {
             };
         } else if cmd == ".set" && args.len() == 2 {
             let candidates = match args[0] {
-                "max_output_tokens" => match self.model.max_output_tokens() {
+                "max_output_tokens" => match self.current_model().max_output_tokens() {
                     Some(v) => vec![v.to_string()],
                     None => vec![],
                 },
@@ -2072,7 +2073,7 @@ impl Config {
             return Ok(());
         }
         let mut file = self.open_message_file()?;
-        if output.is_empty() || !self.save {
+        if output.is_empty() && input.tool_calls().is_none() {
             return Ok(());
         }
         let now = now();
@@ -2279,11 +2280,11 @@ impl Config {
             self.use_tools = v;
         }
 
-        if let Some(v) = read_env_value::<String>(&get_env_name("prelude")) {
-            self.prelude = v;
-        }
         if let Some(v) = read_env_value::<String>(&get_env_name("repl_prelude")) {
             self.repl_prelude = v;
+        }
+        if let Some(v) = read_env_value::<String>(&get_env_name("cmd_prelude")) {
+            self.cmd_prelude = v;
         }
         if let Some(v) = read_env_value::<String>(&get_env_name("agent_prelude")) {
             self.agent_prelude = v;
@@ -2604,7 +2605,7 @@ impl AssertState {
     }
 }
 
-fn create_config_file(config_path: &Path) -> Result<()> {
+async fn create_config_file(config_path: &Path) -> Result<()> {
     let ans = Confirm::new("No config file, create a new one?")
         .with_default(true)
         .prompt()?;
@@ -2615,7 +2616,7 @@ fn create_config_file(config_path: &Path) -> Result<()> {
     let client = Select::new("API Provider (required):", list_client_types()).prompt()?;
 
     let mut config = serde_json::json!({});
-    let (model, clients_config) = create_client_config(client)?;
+    let (model, clients_config) = create_client_config(client).await?;
     config["model"] = model.into();
     config[CLIENTS_FIELD] = clients_config;
 

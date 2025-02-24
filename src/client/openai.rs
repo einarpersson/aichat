@@ -142,7 +142,8 @@ pub async fn openai_chat_completions_streaming(
                 reason_state = 1;
             }
             handler.text(text)?;
-        } else if let (Some(function), index, id) = (
+        }
+        if let (Some(function), index, id) = (
             data["choices"][0]["delta"]["tool_calls"][0]["function"].as_object(),
             data["choices"][0]["delta"]["tool_calls"][0]["index"].as_u64(),
             data["choices"][0]["delta"]["tool_calls"][0]["id"]
@@ -294,12 +295,16 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
         .collect();
 
     let mut body = json!({
-        "model": &model.name(),
+        "model": &model.real_name(),
         "messages": messages,
     });
 
     if let Some(v) = model.max_tokens_param() {
-        body["max_tokens"] = v.into();
+        if model.patch().and_then(|v| v.get("body").and_then(|v| v.get("max_tokens"))) == Some(&Value::Null) {
+            body["max_completion_tokens"] = v.into();
+        } else {
+            body["max_tokens"] = v.into();
+        }
     }
     if let Some(v) = temperature {
         body["temperature"] = v.into();
@@ -327,7 +332,7 @@ pub fn openai_build_chat_completions_body(data: ChatCompletionsData, model: &Mod
 pub fn openai_build_embeddings_body(data: &EmbeddingsData, model: &Model) -> Value {
     json!({
         "input": data.texts,
-        "model": model.name()
+        "model": model.real_name()
     })
 }
 
